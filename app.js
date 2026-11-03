@@ -16,6 +16,7 @@ function send(m){if(channel?.open)channel.send(m);}
 function randomHex(n){return [...crypto.getRandomValues(new Uint8Array(n))].map(v=>v.toString(16).padStart(2,'0')).join('');}
 function prefs(){return {language:$('language').value,consent:$('consent').checked};}
 function validPrefs(m){return !!m&&languages.has(m.language)&&typeof m.consent==='boolean';}
+let joinAttempt=0;
 let captionId=null;
 function clearCaption(){clearTimeout(captionTimer);captionId=null;$('subtitle').textContent='Здесь появится перевод речи собеседника';$('original').textContent='';for(const suffix of ['Previous','Oldest']){$('caption'+suffix).hidden=true;$('subtitle'+suffix).textContent=$('original'+suffix).textContent='';}}
 function showCaption(text,original='',id='legacy'){if(typeof text!=='string')return;
@@ -26,11 +27,11 @@ function showCaption(text,original='',id='legacy'){if(typeof text!=='string')ret
 async function prepareAudio(){if(!hostAudio)hostAudio=new AudioContext();await hostAudio.resume();}
 function renderRole(){
  $('hostKey').hidden=guest;$('translationSettings').hidden=guest;$('guestNote').hidden=!guest;$('invite').hidden=guest;$('join').hidden=!guest;$('translate').hidden=guest;$('stopAI').hidden=guest;
- if(guest){$('waiting').querySelector('p').textContent='Выберите язык и подключитесь к разговору.';$('inviteTitle').textContent='Входящий звонок Lingua';$('inviteHelp').textContent='Нажмите «Принять приглашение». Браузер запросит камеру и микрофон.';status('Вы гость. Подключение начнётся только после нажатия кнопки.');}
+ if(guest){$('join').textContent='Chấp nhận lời mời';$('waiting').querySelector('p').textContent='Выберите язык и подключитесь к разговору.';$('inviteTitle').textContent='Входящий звонок Lingua';$('inviteHelp').textContent='Нажмите «Принять приглашение». Браузер запросит камеру и микрофон.';status('Вы гость. Подключение начнётся только после нажатия кнопки.');}
 }
 renderRole();
 async function media(){if(local)return local;const e=epoch;const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:{facingMode:'user',width:{ideal:1280}}});if(e!==epoch){stream.getTracks().forEach(t=>t.stop());throw Error('Подключение отменено');}local=stream;$('local').srcObject=stream;$('mic').disabled=$('cam').disabled=false;$('media').textContent='Камера подключена';return stream;}
-function action(id,fn){$(id).onclick=async()=>{const b=$(id);b.disabled=true;$('connectionError').textContent='';try{await fn();}catch(e){status(e.name==='NotAllowedError'?'Разрешите доступ к камере и микрофону в настройках браузера.':e.message||'Не удалось выполнить действие.');}finally{b.disabled=(id==='join')?!!peer:false;}};}
+function action(id,fn){$(id).onclick=async()=>{const b=$(id);b.disabled=true;$('connectionError').textContent='';try{await fn();}catch(e){status(e.name==='NotAllowedError'?'Разрешите доступ к камере и микрофону в настройках браузера.':e.message||'Не удалось выполнить действие.');}finally{b.disabled=false;}};}
 function peerFailure(type){
  const messages={
  'peer-unavailable':'Организатор недоступен по этой ссылке. Откройте его вкладку и создайте новое приглашение.',
@@ -63,12 +64,13 @@ function watchCall(c){call=c;c.on('stream',s=>{if(call!==c)return;remote=s;conne
 function bindChannel(c){channel=c;c.on('data',m=>{if(channel!==c||!authorized||!m||typeof m!=='object')return;
  if(m.type==='chat'||m.type==='chat-result'||m.type==='chat-provider'){window.linguaChat?.receive(m);return;}
  if(m.type==='prefs'&&validPrefs(m)){peerPrefs={language:m.language,consent:m.consent};if(!guest)restartAI();}
+ if(!guest&&m.type==='ready'&&expectedGuest===c.peer&&!call){status('Гость готов. Устанавливаем видео…');watchCall(peer.call(expectedGuest,local));}
  if(guest&&m.type==='caption')showCaption(m.text,m.original,typeof m.id==='string'?m.id.slice(0,100):'legacy');
  if(guest&&m.type==='ai-status'&&typeof m.text==='string')$('aiStatus').textContent=m.text.slice(0,180);
  if(m.type==='clear')clearCaption();
  if(m.type==='end')end('Собеседник завершил звонок.');
  });c.on('close',()=>{if(channel===c)end('Соединение с собеседником закрыто.');});c.on('error',()=>{if(channel===c)end('Ошибка канала связи. Подключитесь заново.');});}
-function deadline(){callTimer=setTimeout(()=>{if(!connected)end('Не удалось установить прямое соединение. Попробуйте другую Wi-Fi сеть.');},40000);}
+function deadline(){clearTimeout(callTimer);callTimer=setTimeout(()=>{if(!connected)end('Тайм-аут WebRTC: соединение не установлено за 40 секунд. Повторите попытку.');},40000);}
 action('media',async()=>{await media();status(guest?'Камера готова. Нажмите «Подключиться к звонку».':'Камера готова. Введите ключ и создайте ссылку.');});
 action('invite',async()=>{
  if(guest)return;if(peer){if($('inviteLink').value)await shareInvitation($('inviteLink').value);return;}
@@ -76,24 +78,27 @@ action('invite',async()=>{
  p.on('call',c=>c.close());
  p.on('connection',c=>{if(authorized||pendingConnections.size>=4){c.on('open',()=>c.close());return;}pendingConnections.add(c);let settled=false;const timer=setTimeout(()=>{pendingConnections.delete(c);c.close();},10000);c.on('close',()=>{clearTimeout(timer);pendingConnections.delete(c);});
  c.on('data',m=>{if(settled)return;settled=true;clearTimeout(timer);pendingConnections.delete(c);if(peer!==p||authorized||!m||m.type!=='hello'||m.secret!==secret||!validPrefs(m)){c.close();return;}
- authorized=true;expectedGuest=c.peer;peerPrefs={language:m.language,consent:m.consent};clearTimeout(invitationTimer);bindChannel(c);send({type:'accepted',...prefs()});$('linkBox').hidden=true;deadline();watchCall(p.call(expectedGuest,local));});
+ authorized=true;expectedGuest=c.peer;peerPrefs={language:m.language,consent:m.consent};clearTimeout(invitationTimer);bindChannel(c);send({type:'accepted',...prefs()});$('connection').textContent='○ Гость найден';status('Гость подтверждён. Ожидаем готовности к видеозвонку…');$('linkBox').hidden=true;deadline();});
  });
  const u=new URL(location.href);u.hash=new URLSearchParams({call:p.id,secret}).toString();$('inviteLink').value=u.href;$('linkBox').hidden=true;$('connection').textContent='○ Ожидаем собеседника';status('Приглашение готово. Оставьте страницу открытой.');await shareInvitation(u.href);
 });
 action('join',async()=>{
- if(!guest||peer)return;if(!invitation)throw Error('Приглашение повреждено. Попросите новую ссылку.');await media();const p=await createPeer('lingua-'+randomHex(16));deadline();
+ if(!guest)return;
+ if(peer&&!connected){end('Повторяем подключение…');}
+ if(peer)return;
+ const attempt=++joinAttempt;if(!invitation)throw Error('Приглашение повреждено. Попросите новую ссылку.');status('Шаг 1/4: запускаем камеру…');await media();status('Шаг 2/4: соединяемся с сервером PeerJS…');const p=await createPeer('lingua-'+randomHex(16));deadline();
  p.on('connection',c=>c.on('open',()=>c.close()));
  p.on('call',c=>{if(c.peer!==invitation.id||call){c.close();return;}watchCall(c);c.answer(local);});
- const c=p.connect(invitation.id,{reliable:true,serialization:'json'});channel=c;c.on('open',()=>{if(channel===c)c.send({type:'hello',secret:invitation.secret,...prefs()});});
- c.on('data',m=>{if(channel!==c||authorized||m?.type!=='accepted'||!validPrefs(m))return;authorized=true;peerPrefs={language:m.language,consent:m.consent};bindChannel(c);send({type:'prefs',...prefs()});});
- c.on('error',()=>{if(channel===c)end('Приглашение недоступно. Попросите организатора создать новую ссылку.');});c.on('close',()=>{if(channel===c)end('Звонок завершён или ссылка уже использована.');});status('Подключаемся к организатору…');
+ const c=p.connect(invitation.id,{reliable:true,serialization:'json'});channel=c;c.on('open',()=>{if(channel===c){status('Шаг 3/4: запрос отправлен организатору…');c.send({type:'hello',secret:invitation.secret,...prefs()});}});
+ c.on('data',m=>{if(channel!==c||authorized||m?.type!=='accepted'||!validPrefs(m))return;authorized=true;peerPrefs={language:m.language,consent:m.consent};bindChannel(c);status('Шаг 4/4: организатор подтвердил запрос, ждём видео…');send({type:'prefs',...prefs()});send({type:'ready'});});
+ c.on('error',()=>{if(channel===c)end('Приглашение недоступно. Попросите организатора создать новую ссылку.');});c.on('close',()=>{if(channel===c)end('Звонок завершён или ссылка уже использована.');});status('Шаг 2/4: ищем организатора…');
 });
 action('copy',async()=>{if(!$('inviteLink').value)throw Error('Создайте ссылку.');await navigator.clipboard.writeText($('inviteLink').value);status('Ссылка скопирована. Отправьте её собеседнику.');});
 $('mic').onclick=()=>{const t=local?.getAudioTracks()[0];if(t){t.enabled=!t.enabled;$('mic').textContent='Микрофон: '+(t.enabled?'вкл.':'выкл.');}};
 $('cam').onclick=()=>{const t=local?.getVideoTracks()[0];if(t){t.enabled=!t.enabled;$('cam').textContent='Видео: '+(t.enabled?'вкл.':'выкл.');}};
 $('remote').onclick=()=>$('remote').play().catch(()=>{});
 function updatePrefs(){send({type:'prefs',...prefs()});if(!guest)restartAI();}
-$('consent').onchange=updatePrefs;$('language').onchange=updatePrefs;
+$('consent').onchange=updatePrefs;$('language').onchange=()=>{if(guest)$('join').textContent=({vi:'Chấp nhận lời mời',en:'Accept invitation',ru:'Принять приглашение'})[$('language').value]||'Accept invitation';updatePrefs();};
 function stopSessions(clear=false){aiEpoch++;const old=sessions;sessions=[];old.forEach(s=>s.close());if(clear){clearCaption();send({type:'clear'});}$('stopAI').disabled=true;}
 function end(message='Звонок завершён. Ключ, титры и ссылка очищены.'){
  epoch++;window.linguaKeyManager?.clearSession?.();window.linguaKeyChecks?.clear();window.linguaChat?.clear();clearTimeout(invitationTimer);clearTimeout(callTimer);clearTimeout(recoveryTimer);send({type:'end'});authorized=connected=false;stopSessions(true);hostAudio?.close().catch(()=>{});hostAudio=null;const c=call,p=peer,d=channel;call=peer=channel=null;c?.close();d?.close();pendingConnections.forEach(c=>c.close());pendingConnections.clear();p?.destroy();local?.getTracks().forEach(t=>t.stop());remote?.getTracks().forEach(t=>t.stop());local=remote=null;secret=expectedGuest=null;peerPrefs={consent:false,language:'en'};
