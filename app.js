@@ -58,6 +58,69 @@ function randomHex(n){return [...crypto.getRandomValues(new Uint8Array(n))].map(
 function prefs(){return {language:$('language').value,consent:$('consent').checked};}
 function validPrefs(m){return !!m&&languages.has(m.language)&&typeof m.consent==='boolean';}
 let joinAttempt=0;
+let dataRetryTimer=null,signalRetryTimer=null,hostConnectionTimer=null;
+let dataAttempt=0;
+const MAX_DATA_ATTEMPTS=4;
+function clearConnectionTimers(){clearTimeout(dataRetryTimer);clearTimeout(signalRetryTimer);clearTimeout(hostConnectionTimer);}
+function peerOnline(p){return !!(p&&!p.destroyed&&!p.disconnected&&p.open);}
+function signalReconnect(p){
+ if(peer!==p||p.destroyed||connected)return;
+ clearTimeout(signalRetryTimer);
+ let n=0;
+ const retry=()=>{
+  if(peer!==p||p.destroyed||connected||peerOnline(p))return;
+  if(++n>6){debug('peer:reconnect-exhausted');status('Нет связи с сервером PeerJS. Обновите страницу, сохранив прежнюю ссылку.');return;}
+  debug('peer:reconnect',String(n));status('Восстанавливаем связь с сервером PeerJS… попытка '+n);
+  try{p.reconnect();}catch(e){debug('peer:reconnect-error',e?.type||e?.message||'unknown');}
+  signalRetryTimer=setTimeout(retry,Math.min(2500*n,10000));
+ };
+ signalRetryTimer=setTimeout(retry,1200);
+}
+function guestDataConnect(p){
+ if(!guest||peer!==p||p.destroyed||authorized||connected)return;
+ if(!peerOnline(p)){debug('guest:waiting-peer');signalReconnect(p);return;}
+ if(dataAttempt>=MAX_DATA_ATTEMPTS){
+  debug('guest:connection-attempts-exhausted');
+  updateDiagnostics({data:'timeout'});
+  status('Канал данных не открылся. Организатор должен оставаться онлайн. Нажмите «Принять приглашение» для новой попытки.');
+  return;
+ }
+ dataAttempt++;
+ const attemptNo=dataAttempt;
+ if(channel){const old=channel;channel=null;try{old.close();}catch{}}
+ debug('guest:data-attempt',String(attemptNo));
+ status('Шаг 2/4: соединяемся с организатором (попытка '+attemptNo+'/'+MAX_DATA_ATTEMPTS+')…');
+ const c=p.connect(invitation.id,{reliable:false,serialization:'json'});
+ channel=c;watchDataTransport(c,'guest');
+ let opened=false;
+ clearTimeout(dataRetryTimer);
+ const retry=(reason)=>{
+  if(channel!==c||authorized||connected||peer!==p)return;
+  debug('guest:data-retry',reason);
+  clearTimeout(dataRetryTimer);
+  channel=null;try{c.close();}catch{}
+  dataRetryTimer=setTimeout(()=>guestDataConnect(p),1200);
+ };
+ c.on('open',()=>{
+  if(channel!==c)return;
+  opened=true;debug('guest:data-open');updateDiagnostics({data:'open'});
+  status('Шаг 3/4: запрос отправлен организатору…');
+  c.send({type:'hello',secret:invitation.secret,...prefs()});
+  clearTimeout(dataRetryTimer);
+  dataRetryTimer=setTimeout(()=>retry('no-accept'),11000);
+ });
+ c.on('data',m=>{
+  if(channel!==c||authorized||m?.type!=='accepted'||!validPrefs(m))return;
+  clearTimeout(dataRetryTimer);debug('guest:accepted');authorized=true;
+  peerPrefs={language:m.language,consent:m.consent};bindChannel(c);
+  status('Шаг 4/4: организатор подтвердил запрос, ждём видео…');
+  send({type:'prefs',...prefs()});send({type:'ready'});
+ });
+ c.on('error',e=>{if(channel!==c)return;debug('guest:data-error',e?.type||e?.message||'unknown');updateDiagnostics({data:'error'});retry('error');});
+ c.on('close',()=>{if(channel!==c)return;debug('guest:data-close');updateDiagnostics({data:'closed'});retry('closed');});
+ dataRetryTimer=setTimeout(()=>retry(opened?'no-accept':'no-open'),12000);
+}
+
 let captionId=null;
 function clearCaption(){clearTimeout(captionTimer);captionId=null;$('subtitle').textContent='Здесь появится перевод речи собеседника';$('original').textContent='';for(const suffix of ['Previous','Oldest']){$('caption'+suffix).hidden=true;$('subtitle'+suffix).textContent=$('original'+suffix).textContent='';}}
 function showCaption(text,original='',id='legacy'){if(typeof text!=='string')return;
@@ -90,15 +153,16 @@ function peerFailure(type){
  return messages[type]||'Не удалось подключиться. Обновите страницу и создайте новое приглашение.';
 }
 function createPeer(id){return new Promise((resolve,reject)=>{
- debug('peer:create',guest?'guest':'host');updateDiagnostics({peer:'connecting',data:'idle',ice:'n/a',signal:'n/a'});const p=new Peer(id,{host:'0.peerjs.com',port:443,path:'/',secure:true,debug:0,config:{iceServers:[{urls:'stun:stun.l.google.com:19302'}]}});peer=p;
+ debug('peer:create',guest?'guest':'host');updateDiagnostics({peer:'connecting',data:'idle',ice:'n/a',signal:'n/a'});const p=new Peer(id,{host:'0.peerjs.com',port:443,path:'/',secure:true,debug:0,
+ config:{iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'},{urls:'stun:stun.cloudflare.com:3478'}],iceTransportPolicy:'all'}});peer=p;
  const timer=setTimeout(()=>{const message='Сервис подключения не ответил. Попробуйте ещё раз.';if(peer===p)end(message);reject(Error(message));},15000);
- p.on('open',()=>{debug('peer:open');updateDiagnostics({peer:'connected'});clearTimeout(timer);if(peer===p)resolve(p);else p.destroy();});
+ p.on('open',()=>{debug('peer:open');updateDiagnostics({peer:'connected'});clearTimeout(timer);clearTimeout(signalRetryTimer);if(peer===p)resolve(p);else p.destroy();});
  p.on('error',error=>{clearTimeout(timer);if(peer!==p)return;const type=error?.type;debug('peer:error',type||error?.name||'unknown');updateDiagnostics({peer:'error:'+String(type||'unknown').slice(0,30)});const message=peerFailure(type);
   // A signaling outage must not tear down an already established P2P call.
-  if(connected&&['network','disconnected'].includes(type)){status('Связь с сервером подключения потеряна. Текущий звонок продолжается.');return;}
+  if(['network','socket-error','socket-closed'].includes(type)){signalReconnect(p);return;}
   end(message);$('connectionError').textContent='Код: '+(typeof type==='string'&&/^[a-z-]{1,40}$/.test(type)?type:'unknown');reject(Error(message));
  });
- p.on('disconnected',()=>{debug('peer:disconnected');updateDiagnostics({peer:'disconnected'});if(peer!==p)return;if(connected){status('Связь с сервером подключения потеряна. Текущий звонок продолжается.');return;}const message='Связь с сервисом подключения потеряна. Создайте новую ссылку.';clearTimeout(timer);end(message);reject(Error(message));});
+ p.on('disconnected',()=>{debug('peer:disconnected');updateDiagnostics({peer:'disconnected'});if(peer!==p)return;if(connected){status('Сервер сигнализации временно недоступен. Видеозвонок продолжается.');return;}signalReconnect(p);});
 });}
 
 function watchCall(c){debug('media:call',guest?'incoming':'outgoing');call=c;c.on('stream',s=>{debug('media:stream');if(call!==c)return;remote=s;connected=true;window.linguaChat?.connected();clearTimeout(invitationTimer);clearTimeout(callTimer);$('remote').srcObject=s;$('remote').play().catch(()=>status('Нажмите на видео для воспроизведения звука.'));$('waiting').hidden=true;$('connection').textContent='● Прямое соединение';status('Вы на связи. Ключ используется только в браузере организатора.');$('linkBox').hidden=true;if(!guest)restartAI();});c.on('close',()=>{if(call===c)end('Собеседник завершил звонок.');});c.on('error',()=>{if(call===c)end('Соединение прервалось. Создайте новый звонок.');});c.peerConnection?.addEventListener('connectionstatechange',()=>{if(call!==c)return;const state=c.peerConnection.connectionState;debug('webrtc:state',state);clearTimeout(recoveryTimer);if(state==='failed')end('Не удалось восстановить прямое соединение. Попробуйте другую сеть.');else if(state==='disconnected'){status('Связь временно потеряна. Ждём восстановления…');recoveryTimer=setTimeout(()=>{if(call===c&&c.peerConnection.connectionState==='disconnected')end('Не удалось восстановить прямое соединение. Попробуйте другую сеть.');},12000);}else if(state==='connected')status('Вы на связи. Ключ используется только в браузере организатора.');});}
@@ -117,9 +181,22 @@ action('invite',async()=>{
  if(guest)return;if(peer){if($('inviteLink').value)await shareInvitation($('inviteLink').value);return;}
  await prepareAudio();await media();const room=permanentRoom();const p=await createPeer(room.id);secret=room.secret;translationEnabled=true;
  p.on('call',c=>c.close());
- p.on('connection',c=>{debug('host:incoming-data');watchDataTransport(c,'host');if(authorized||pendingConnections.size>=4){c.on('open',()=>c.close());return;}pendingConnections.add(c);let settled=false;const timer=setTimeout(()=>{pendingConnections.delete(c);c.close();},10000);c.on('close',()=>{clearTimeout(timer);pendingConnections.delete(c);});
- c.on('data',m=>{debug('host:hello',m?.type||'unknown');if(settled)return;settled=true;clearTimeout(timer);pendingConnections.delete(c);if(peer!==p||authorized||!m||m.type!=='hello'||m.secret!==secret||!validPrefs(m)){c.close();return;}
- debug('host:accepted-hello');authorized=true;expectedGuest=c.peer;peerPrefs={language:m.language,consent:m.consent};clearTimeout(invitationTimer);bindChannel(c);send({type:'accepted',...prefs()});$('connection').textContent='○ Гость найден';status('Гость подтверждён. Ожидаем готовности к видеозвонку…');$('linkBox').hidden=true;deadline();});
+ p.on('connection',c=>{
+ debug('host:incoming-data');pendingConnections.add(c);watchDataTransport(c,'host');
+ if(authorized||pendingConnections.size>4){pendingConnections.delete(c);c.on('open',()=>c.close());return;}
+ let settled=false;
+ let timer=setTimeout(()=>{debug('host:data-timeout');pendingConnections.delete(c);try{c.close();}catch{}},24000);
+ c.on('open',()=>{debug('host:data-open');updateDiagnostics({data:'open'});});
+ c.on('error',e=>{debug('host:data-error',e?.type||e?.message||'unknown');});
+ c.on('close',()=>{clearTimeout(timer);pendingConnections.delete(c);});
+ c.on('data',m=>{
+  debug('host:hello',m?.type||'unknown');if(settled)return;
+  if(peer!==p||authorized||!m||m.type!=='hello'||m.secret!==secret||!validPrefs(m)){debug('host:hello-rejected');c.close();return;}
+  settled=true;clearTimeout(timer);pendingConnections.delete(c);
+  debug('host:accepted-hello');authorized=true;expectedGuest=c.peer;peerPrefs={language:m.language,consent:m.consent};
+  clearTimeout(invitationTimer);bindChannel(c);send({type:'accepted',...prefs()});
+  $('connection').textContent='○ Гость найден';status('Гость подтверждён. Ожидаем готовности к видеозвонку…');$('linkBox').hidden=true;deadline();
+ });
  });
  const u=new URL(location.href);u.hash=new URLSearchParams({call:p.id,secret}).toString();$('inviteLink').value=u.href;$('linkBox').hidden=true;$('connection').textContent='○ Ожидаем собеседника';status('Приглашение готово. Оставьте страницу открытой.');debug('host:waiting-guest');await shareInvitation(u.href);
 });
@@ -130,9 +207,7 @@ action('join',async()=>{
  const attempt=++joinAttempt;if(!invitation)throw Error('Приглашение повреждено. Попросите новую ссылку.');status('Шаг 1/4: запускаем камеру…');await media();status('Шаг 2/4: соединяемся с сервером PeerJS…');const p=await createPeer('lingua-'+randomHex(16));deadline();
  p.on('connection',c=>c.on('open',()=>c.close()));
  p.on('call',c=>{debug('guest:incoming-call');if(c.peer!==invitation.id||call){c.close();return;}watchCall(c);c.answer(local);});
- debug('guest:connect-request');const c=p.connect(invitation.id,{reliable:true,serialization:'json'});channel=c;watchDataTransport(c,'guest');c.on('open',()=>{debug('guest:data-open');updateDiagnostics({data:'open'});if(channel===c){status('Шаг 3/4: запрос отправлен организатору…');c.send({type:'hello',secret:invitation.secret,...prefs()});}});
- c.on('data',m=>{if(channel!==c||authorized||m?.type!=='accepted'||!validPrefs(m))return;debug('guest:accepted');authorized=true;peerPrefs={language:m.language,consent:m.consent};bindChannel(c);status('Шаг 4/4: организатор подтвердил запрос, ждём видео…');send({type:'prefs',...prefs()});send({type:'ready'});});
- c.on('error',e=>{debug('guest:data-error',e?.type||e?.message||'unknown');updateDiagnostics({data:'error'});if(channel===c)end('Приглашение недоступно. Попросите организатора создать новую ссылку.');});c.on('close',()=>{debug('guest:data-close');updateDiagnostics({data:'closed'});if(channel===c)end('Звонок завершён или ссылка уже использована.');});status('Шаг 2/4: ищем организатора…');debug('guest:waiting-data-open');
+ dataAttempt=0;guestDataConnect(p);
 });
 action('copy',async()=>{if(!$('inviteLink').value)throw Error('Создайте ссылку.');await navigator.clipboard.writeText($('inviteLink').value);status('Ссылка скопирована. Отправьте её собеседнику.');});
 $('mic').onclick=()=>{const t=local?.getAudioTracks()[0];if(t){t.enabled=!t.enabled;$('mic').textContent='Микрофон: '+(t.enabled?'вкл.':'выкл.');}};
@@ -142,7 +217,7 @@ function updatePrefs(){send({type:'prefs',...prefs()});if(!guest)restartAI();}
 $('consent').onchange=updatePrefs;$('language').onchange=()=>{if(guest)$('join').textContent=({vi:'Chấp nhận lời mời',en:'Accept invitation',ru:'Принять приглашение'})[$('language').value]||'Accept invitation';updatePrefs();};
 function stopSessions(clear=false){aiEpoch++;const old=sessions;sessions=[];old.forEach(s=>s.close());if(clear){clearCaption();send({type:'clear'});}$('stopAI').disabled=true;}
 function end(message='Звонок завершён. Ключ, титры и ссылка очищены.'){
- epoch++;window.linguaKeyManager?.clearSession?.();window.linguaKeyChecks?.clear();window.linguaChat?.clear();clearTimeout(invitationTimer);clearTimeout(callTimer);clearTimeout(recoveryTimer);send({type:'end'});authorized=connected=false;stopSessions(true);hostAudio?.close().catch(()=>{});hostAudio=null;const c=call,p=peer,d=channel;call=peer=channel=null;c?.close();d?.close();pendingConnections.forEach(c=>c.close());pendingConnections.clear();p?.destroy();local?.getTracks().forEach(t=>t.stop());remote?.getTracks().forEach(t=>t.stop());local=remote=null;secret=expectedGuest=null;peerPrefs={consent:false,language:'en'};
+ epoch++;clearConnectionTimers();dataAttempt=0;window.linguaKeyManager?.clearSession?.();window.linguaKeyChecks?.clear();window.linguaChat?.clear();clearTimeout(invitationTimer);clearTimeout(callTimer);clearTimeout(recoveryTimer);send({type:'end'});authorized=connected=false;stopSessions(true);hostAudio?.close().catch(()=>{});hostAudio=null;const c=call,p=peer,d=channel;call=peer=channel=null;c?.close();d?.close();pendingConnections.forEach(c=>c.close());pendingConnections.clear();p?.destroy();local?.getTracks().forEach(t=>t.stop());remote?.getTracks().forEach(t=>t.stop());local=remote=null;secret=expectedGuest=null;peerPrefs={consent:false,language:'en'};
  $('local').srcObject=$('remote').srcObject=null;$('chatGeminiKey').value=$('deepseekKey').value=$('credential').value=$('inviteLink').value='';$('linkBox').hidden=true;$('waiting').hidden=false;$('consent').checked=false;$('mic').disabled=$('cam').disabled=true;$('mic').textContent='Микрофон: вкл.';$('cam').textContent='Видео: вкл.';$('media').textContent='Проверить камеру';$('connection').textContent='○ Не подключено';$('aiStatus').textContent='Перевод выключен';$('invite').disabled=$('join').disabled=false;status(message);
 }
 $('hangup').onclick=()=>end();window.addEventListener('pagehide',()=>end());
