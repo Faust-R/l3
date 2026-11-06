@@ -36,3 +36,16 @@ Connection revision: retain persistent room link; retry guest DataConnection up 
 - The connection label shows `● Соединение через TURN` when the selected candidate pair uses the relay.
 - Cross-site requests to `/api/turn` are refused (Sec-Fetch-Site). This blocks other web pages, not scripted clients; Cloudflare usage is visible in its dashboard.
 - Tested locally: middleware with mocked Cloudflare responses; two Chromium instances through a local TURN server in relay-only mode; fallback with `/api/turn` missing. Not yet tested against the real Cloudflare API or on iPhones.
+
+
+## Chat first, separate video window (2026-11-05)
+- Accepting the invitation opens only the translated chat (data channel); no camera is requested.
+- Video call: camera button to the right of the translation language. It opens a separate full-screen video window and turns the camera on. The other side sees a pulsing camera button and «Собеседник приглашает в видеозвонок → Включить видео». The organiser starts the media call once both windows are open.
+- In the video window: microphone, video, voice consent, captions (host), «Чат» (back to the chat, the call continues; a red dot shows new messages) and «Выключить видео» (ends only the video, the chat continues). Video failures never end the chat; the organiser retries the video twice.
+- «Завершить разговор» ends the session. On the organiser's side the permanent link stays valid; the organiser's camera is switched off when the guest leaves.
+- Debug panel is hidden; «⚙ Настройки» (bottom) → «Показывать диагностику соединения» (remembered on the device). `&relay=1` turns it on automatically.
+- API keys: each key has its own login-style form (hidden user name «Gemini API» / «DeepSeek API» + password field with `autocomplete=current-password`), so Safari / the iPhone Passwords app offers saved keys on tap. «Проверить» submits the form into an `about:blank` iframe: Safari sees a real submission and can offer to save; nothing is sent over the network (verified: no requests). The site itself still never stores keys. Manual fallback: Passwords app → «+» → this site, user «Gemini API» or «DeepSeek API», password = key.
+- «Получить ключ» next to each key: Gemini → aistudio.google.com/app/apikey, DeepSeek → platform.deepseek.com/api_keys.
+- Keys are no longer wiped when a conversation ends (they are re-filled from Passwords anyway).
+- New protocol messages on the data channel: `video-ready`, `video-end` (replace `ready`).
+- Tested in two Chromium instances (iPhone-sized viewport) with a local PeerJS server: chat-only connect, video invite/accept, minimise during a call, video off with chat continuing, video on again, hang-up and rejoin, debug toggle, key form submit without network requests. The Safari save prompt for keys could not be tested here.

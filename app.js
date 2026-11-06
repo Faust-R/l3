@@ -158,20 +158,20 @@ function clearConnectionTimers(){clearTimeout(dataRetryTimer);clearTimeout(signa
 function peerOnline(p){return !!(p&&!p.destroyed&&!p.disconnected&&p.open);}
 // One reconnect schedule per Peer; repeated "disconnected" events do not restart the counter.
 function signalReconnect(p){
- if(peer!==p||p.destroyed||connected||signalRetryTimer)return;
+ if(peer!==p||p.destroyed||signalRetryTimer)return;
  const delay=signalAttempts?Math.min(2500*signalAttempts,10000):1200;
  signalRetryTimer=setTimeout(()=>{
   signalRetryTimer=null;
-  if(peer!==p||p.destroyed||connected||peerOnline(p))return;
+  if(peer!==p||p.destroyed||peerOnline(p))return;
   if(++signalAttempts>6){debug('peer:reconnect-exhausted');status('Нет связи с сервером PeerJS. Обновите страницу, сохранив прежнюю ссылку.');return;}
-  debug('peer:reconnect',String(signalAttempts));status('Восстанавливаем связь с сервером PeerJS…');
+  debug('peer:reconnect',String(signalAttempts));if(!authorized)status('Восстанавливаем связь с сервером PeerJS…');
   try{if(p.disconnected)p.reconnect();}catch(e){debug('peer:reconnect-error',e?.type||e?.message||'unknown');}
   signalReconnect(p);
  },delay);
 }
 // iOS often drops the signaling socket while Safari is in the background; reconnect as soon as the page is visible again.
 document.addEventListener('visibilitychange',()=>{
- if(document.visibilityState!=='visible'||!peer||peer.destroyed||connected)return;
+ if(document.visibilityState!=='visible'||!peer||peer.destroyed)return;
  if(!peerOnline(peer)){debug('page:visible-reconnect');signalAttempts=0;clearTimeout(signalRetryTimer);signalRetryTimer=null;try{if(peer.disconnected)peer.reconnect();}catch{}signalReconnect(peer);}
 });
 function guestDataConnect(p){
@@ -189,7 +189,7 @@ function guestDataConnect(p){
  // Crucial: never negotiate two simultaneous data channels to the same host.
  if(channel){const previous=channel;channel=null;try{previous.close();}catch{}}
  debug('guest:data-attempt',String(attemptNo));
- status('Шаг 2/4: согласовываем канал ('+attemptNo+'/'+MAX_DATA_ATTEMPTS+')…');
+ status('Шаг 2/3: согласовываем канал ('+attemptNo+'/'+MAX_DATA_ATTEMPTS+')…');
  let c;
  try{c=p.connect(invitation.id,{reliable:true,serialization:'json'});}catch(e){debug('guest:connect-throw',e?.message||'unknown');dataRetryTimer=setTimeout(()=>guestDataConnect(p),3500);return;}
  channel=c;watchDataTransport(c,'guest');
@@ -210,7 +210,7 @@ function guestDataConnect(p){
   if(!current())return;
   hostMissing=0;
   debug('guest:data-open');updateDiagnostics({data:'open'});
-  status('Шаг 3/4: организатор найден; ожидаем подтверждения…');
+  status('Шаг 3/3: организатор найден; ожидаем подтверждения…');
   c.send({type:'hello',secret:invitation.secret,...prefs()});
   clearTimeout(dataRetryTimer);
   dataRetryTimer=setTimeout(()=>retry('no-accept'),18000);
@@ -219,8 +219,7 @@ function guestDataConnect(p){
   if(!current()||m?.type!=='accepted'||!validPrefs(m))return;
   clearTimeout(dataRetryTimer);debug('guest:accepted');authorized=true;
   peerPrefs={language:m.language,consent:m.consent};bindChannel(c);
-  status('Шаг 4/4: ожидаем видеозвонок…');deadline();
-  send({type:'prefs',...prefs()});send({type:'ready'});
+  send({type:'prefs',...prefs()});sessionOnline();
  });
  c.on('error',e=>{
   if(!current())return;
@@ -241,11 +240,12 @@ function showCaption(text,original='',id='legacy'){if(typeof text!=='string')ret
 
 async function prepareAudio(){if(!hostAudio)hostAudio=new AudioContext();await hostAudio.resume();}
 function renderRole(){
- $('hostKey').hidden=guest;$('translationSettings').hidden=guest;$('guestNote').hidden=!guest;$('invite').hidden=guest;$('join').hidden=!guest;$('translate').hidden=guest;$('stopAI').hidden=guest;
- if(guest){$('join').textContent='Chấp nhận lời mời';$('waiting').querySelector('p').textContent='Выберите язык и подключитесь к разговору.';$('inviteTitle').textContent='Входящий звонок Lingua';$('inviteHelp').textContent='Нажмите «Принять приглашение». Браузер запросит камеру и микрофон.';status('Вы гость. Подключение начнётся только после нажатия кнопки.');}
+ $('invite').hidden=guest;$('join').hidden=!guest;$('translate').hidden=guest;$('stopAI').hidden=guest;
+ if(guest){$('join').textContent='Chấp nhận lời mời';status('Нажмите «Принять приглашение», чтобы открыть чат. Видео включается кнопкой камеры.');}
+ else status('Нажмите «Пригласить» и отправьте ссылку собеседнику.');
 }
 renderRole();
-async function media(){if(local)return local;const e=epoch;const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:{facingMode:'user',width:{ideal:1280}}});if(e!==epoch){stream.getTracks().forEach(t=>t.stop());throw Error('Подключение отменено');}local=stream;$('local').srcObject=stream;$('mic').disabled=$('cam').disabled=false;$('media').textContent='Камера подключена';return stream;}
+async function media(){if(local)return local;const e=epoch;const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:{facingMode:'user',width:{ideal:1280}}});if(e!==epoch){stream.getTracks().forEach(t=>t.stop());throw Error('Подключение отменено');}local=stream;$('local').srcObject=stream;$('mic').disabled=$('cam').disabled=false;return stream;}
 function action(id,fn){$(id).onclick=async()=>{const b=$(id);b.disabled=true;$('connectionError').textContent='';try{await fn();}catch(e){status(e.name==='NotAllowedError'?'Разрешите доступ к камере и микрофону в настройках браузера.':e.message||'Не удалось выполнить действие.');}finally{b.disabled=false;}};}
 function peerFailure(type){
  const messages={
@@ -303,7 +303,7 @@ function createPeer(id){return new Promise((resolve,reject)=>{
      status('Организатор не в сети. Попросите его вернуться на страницу Lingua и не сворачивать Safari. Ищем снова…');
     }else{status('Ошибка согласования WebRTC. Пробуем снова…');updateDiagnostics({data:'retrying'});}
     dataRetryTimer=setTimeout(()=>guestDataConnect(p),type==='peer-unavailable'?5000:4000);
-   }else if(!guest&&!connected){status('Канал гостя не согласован. Организатор остаётся доступен по прежней ссылке.');}
+   }else if(!guest&&!authorized){status('Канал гостя не согласован. Организатор остаётся доступен по прежней ссылке.');}
    return;
   }
   if(['network','socket-error','socket-closed'].includes(type)){
@@ -317,12 +317,17 @@ function createPeer(id){return new Promise((resolve,reject)=>{
  p.on('disconnected',()=>{
   debug('peer:disconnected');updateDiagnostics({peer:'disconnected'});
   if(peer!==p)return;
-  if(connected){status('Сигнализация временно недоступна; текущий видеозвонок продолжается.');return;}
   signalReconnect(p);
  });
 });}
 
-function watchCall(c){debug('media:call',guest?'incoming':'outgoing');call=c;c.on('stream',s=>{debug('media:stream');if(call!==c)return;remote=s;connected=true;window.linguaChat?.connected();clearTimeout(invitationTimer);clearTimeout(callTimer);$('remote').srcObject=s;$('remote').play().catch(()=>status('Нажмите на видео для воспроизведения звука.'));$('waiting').hidden=true;$('connection').textContent='● Прямое соединение';setTimeout(()=>showRoute(c),1500);status('Вы на связи. Ключ используется только в браузере организатора.');$('linkBox').hidden=true;if(!guest)restartAI();});c.on('close',()=>{if(call===c)dropPeer('Собеседник завершил звонок.');});c.on('error',()=>{if(call===c)dropPeer('Соединение прервалось.');});c.peerConnection?.addEventListener('connectionstatechange',()=>{if(call!==c)return;const state=c.peerConnection.connectionState;debug('webrtc:state',state);clearTimeout(recoveryTimer);if(state==='failed')dropPeer('Не удалось восстановить прямое соединение.');else if(state==='disconnected'){status('Связь временно потеряна. Ждём восстановления…');recoveryTimer=setTimeout(()=>{if(call===c&&c.peerConnection.connectionState==='disconnected')dropPeer('Не удалось восстановить прямое соединение.');},12000);}else if(state==='connected')status('Вы на связи. Ключ используется только в браузере организатора.');});}
+function watchCall(c){
+ debug('media:call',guest?'incoming':'outgoing');call=c;videoDeadline();
+ c.on('stream',s=>{debug('media:stream');if(call!==c)return;remote=s;connected=true;videoRetries=0;clearTimeout(callTimer);$('remote').srcObject=s;$('remote').play().catch(()=>videoStatus('Нажмите на видео для воспроизведения звука.'));$('waiting').hidden=true;$('connection').textContent='● Прямое соединение';setTimeout(()=>showRoute(c),1500);videoStatus('Видеосвязь установлена.');updateVideoUI();if(!guest)restartAI();});
+ c.on('close',()=>{if(call===c)videoDropped('Видеосвязь завершена.');});
+ c.on('error',()=>{if(call===c)videoDropped('Видеосвязь прервалась.');});
+ c.peerConnection?.addEventListener('connectionstatechange',()=>{if(call!==c)return;const state=c.peerConnection.connectionState;debug('webrtc:state',state);clearTimeout(recoveryTimer);if(state==='failed')videoDropped('Не удалось установить видеосвязь.');else if(state==='disconnected'){videoStatus('Видеосвязь временно потеряна. Ждём восстановления…');recoveryTimer=setTimeout(()=>{if(call===c&&c.peerConnection.connectionState==='disconnected')videoDropped('Не удалось восстановить видеосвязь.');},12000);}else if(state==='connected')videoStatus('Видеосвязь установлена.');});
+}
 // Shows whether the media flows directly or through the TURN relay (from the selected ICE candidate pair).
 async function showRoute(c){
  const rtc=c?.peerConnection;if(!rtc||call!==c)return;
@@ -339,13 +344,82 @@ async function showRoute(c){
 function bindChannel(c){debug('data:authorized');channel=c;c.on('data',m=>{if(channel!==c||!authorized||!m||typeof m!=='object')return;
  if(m.type==='chat'||m.type==='chat-result'||m.type==='chat-provider'){window.linguaChat?.receive(m);return;}
  if(m.type==='prefs'&&validPrefs(m)){peerPrefs={language:m.language,consent:m.consent};if(!guest)restartAI();}
- if(!guest&&m.type==='ready'&&expectedGuest===c.peer&&!call){status('Гость готов. Устанавливаем видео…');watchCall(peer.call(expectedGuest,local));}
+ if(m.type==='video-ready'){peerVideo=true;if(videoOpen){videoStatus('Собеседник включил камеру. Подключаем видео…');startVideoCall();}updateVideoUI();}
+ if(m.type==='video-end'){peerVideo=false;if(call||connected)videoDropped('Собеседник выключил видео.');else if(videoOpen)videoStatus('Собеседник выключил видео.');if(!$('callWindow').classList.contains('open'))status('Собеседник выключил видео. Чат продолжается.');updateVideoUI();}
  if(guest&&m.type==='caption')showCaption(m.text,m.original,typeof m.id==='string'?m.id.slice(0,100):'legacy');
  if(guest&&m.type==='ai-status'&&typeof m.text==='string')$('aiStatus').textContent=m.text.slice(0,180);
  if(m.type==='clear')clearCaption();
- if(m.type==='end')dropPeer('Собеседник завершил звонок.');
+ if(m.type==='end')dropPeer('Собеседник завершил разговор.');
  });c.on('close',()=>{if(channel===c)dropPeer('Соединение с собеседником закрыто.');});c.on('error',()=>{if(channel===c)dropPeer('Ошибка канала связи. Подключитесь заново.');});}
-function deadline(){clearTimeout(callTimer);callTimer=setTimeout(()=>{if(!connected)dropPeer('Тайм-аут WebRTC: соединение не установлено за 40 секунд. Повторите попытку.');},40000);}
+// ---- Chat session and video call are separate: the data channel carries the chat; video is an optional call on top. ----
+let videoOpen=false,peerVideo=false,videoRetries=0;
+function videoStatus(t){$('videoStatus').textContent=t;}
+function sessionOnline(){
+ status(guest?'Вы на связи в чате. Для видеозвонка нажмите кнопку камеры.':'Собеседник подключился к чату. Для видеозвонка нажмите кнопку камеры.');
+ window.linguaChat?.connected();if(videoOpen)send({type:'video-ready'});updateVideoUI();
+}
+function updateVideoUI(){
+ const win=$('callWindow'),shown=win.classList.contains('open');
+ $('camera').classList.toggle('active',videoOpen);$('camera').classList.toggle('ringing',peerVideo&&!videoOpen&&authorized);$('camera').setAttribute('aria-pressed',String(videoOpen));
+ $('videoInvite').hidden=!(peerVideo&&!videoOpen&&authorized);
+ $('hangup').hidden=!authorized;
+ // During a conversation the invite/join buttons are not needed.
+ $('invite').hidden=guest||authorized;$('join').hidden=!guest||authorized;
+ $('mic').disabled=$('cam').disabled=!local;
+ if(!shown)$('videoChat').classList.remove('unread');
+}
+function showVideoWindow(show){
+ const win=$('callWindow');win.classList.toggle('open',show);if(show)win.removeAttribute('inert');else win.setAttribute('inert','');
+ document.body.classList.toggle('video-open',show);if(show)$('videoChat').classList.remove('unread');updateVideoUI();
+}
+function videoDeadline(){clearTimeout(callTimer);callTimer=setTimeout(()=>{if(!connected&&call)videoDropped('Видео не подключилось за 40 секунд.');},40000);}
+// Host side: starts the media call once both participants have opened their video window.
+function startVideoCall(){
+ if(guest||!authorized||!videoOpen||!peerVideo||call||!local||!peer||peer.destroyed||!expectedGuest)return;
+ videoStatus('Подключаем видео…');
+ try{watchCall(peer.call(expectedGuest,local));}catch(e){debug('media:call-throw',e?.message||'unknown');videoStatus('Не удалось начать видеозвонок.');}
+}
+function videoDropped(message){
+ clearTimeout(callTimer);clearTimeout(recoveryTimer);
+ const c=call;call=null;connected=false;try{c?.close();}catch{}
+ stopSessions(true);
+ remote?.getTracks().forEach(t=>t.stop());remote=null;$('remote').srcObject=null;$('waiting').hidden=false;
+ $('connection').textContent='○ Видео не подключено';videoStatus(message);updateVideoUI();
+ // Both sides still want video: the host retries a limited number of times.
+ if(!guest&&videoOpen&&peerVideo&&authorized&&videoRetries<2){videoRetries++;setTimeout(startVideoCall,3000);}
+}
+async function openVideo(){
+ showVideoWindow(true);
+ if(videoOpen)return;
+ videoStatus('Включаем камеру…');
+ // iOS allows an AudioContext only during the tap; create it before waiting for the camera prompt.
+ if(!guest)prepareAudio().catch(()=>{});
+ try{await media();}catch(e){videoStatus(e?.name==='NotAllowedError'?'Разрешите доступ к камере и микрофону в настройках браузера.':'Не удалось включить камеру.');updateVideoUI();return;}
+ videoOpen=true;videoRetries=0;
+ if(authorized){send({type:'video-ready'});videoStatus(peerVideo?'Подключаем видео…':'Ждём, когда собеседник включит камеру…');startVideoCall();}
+ else videoStatus('Видео начнётся после подключения собеседника.');
+ updateVideoUI();
+}
+// Ends only the video: the chat stays open.
+function closeVideo(message='Видео выключено. Чат продолжается.'){
+ if(videoOpen)send({type:'video-end'});
+ videoOpen=false;clearTimeout(callTimer);clearTimeout(recoveryTimer);
+ const c=call;call=null;connected=false;try{c?.close();}catch{}
+ stopSessions(true);
+ remote?.getTracks().forEach(t=>t.stop());local?.getTracks().forEach(t=>t.stop());remote=local=null;
+ $('remote').srcObject=$('local').srcObject=null;$('waiting').hidden=false;$('connection').textContent='○ Видео не подключено';
+ $('mic').textContent='Микрофон: вкл.';$('cam').textContent='Видео: вкл.';$('aiStatus').textContent='Перевод выключен';videoStatus('');
+ showVideoWindow(false);status(message);updateVideoUI();
+}
+$('camera').onclick=()=>openVideo();
+$('acceptVideo').onclick=()=>openVideo();
+$('videoChat').onclick=()=>{showVideoWindow(false);if(videoOpen)status('Видеозвонок продолжается. Нажмите кнопку камеры, чтобы вернуться к видео.');};
+$('videoEnd').onclick=()=>closeVideo();
+window.addEventListener('lingua-chat-incoming',()=>{if($('callWindow').classList.contains('open'))$('videoChat').classList.add('unread');});
+// Debug panel: hidden unless enabled in the settings (remembered on this device only).
+function setDebug(on){document.body.classList.toggle('debug-on',on);$('debugToggle').checked=on;try{localStorage.setItem('lingua.debug',on?'1':'0');}catch{}}
+setDebug(RELAY_ONLY||(()=>{try{return localStorage.getItem('lingua.debug')==='1';}catch{return false;}})());
+$('debugToggle').onchange=()=>setDebug($('debugToggle').checked);
 // Guest: a failure ends the session. Host: drop only the guest and keep the PeerJS registration,
 // camera and keys, so the permanent link keeps working without pressing «Пригласить» again.
 function dropPeer(message){if(guest||!peer){end(message);return;}resetHostRoom(message);}
@@ -353,20 +427,22 @@ function resetHostRoom(message){
  debug('host:room-reset');
  send({type:'end'});
  clearTimeout(callTimer);clearTimeout(recoveryTimer);
- const c=call,d=channel;call=channel=null;authorized=connected=false;expectedGuest=null;
+ const c=call,d=channel;call=channel=null;authorized=connected=false;expectedGuest=null;peerVideo=false;videoRetries=0;
  stopSessions(true);window.linguaChat?.clear();
  try{c?.close();}catch{}try{d?.close();}catch{}
  pendingConnections.forEach(x=>{try{x.close();}catch{}});pendingConnections.clear();
  remote?.getTracks().forEach(t=>t.stop());remote=null;$('remote').srcObject=null;$('waiting').hidden=false;
  peerPrefs={consent:false,language:'en'};
- $('connection').textContent='○ Ожидаем собеседника';$('aiStatus').textContent='Перевод выключен';
+ $('connection').textContent='○ Видео не подключено';$('aiStatus').textContent='Перевод выключен';
  updateDiagnostics({data:'idle',ice:'n/a',signal:'n/a',cand:''});
+ // The guest has left: switch the organiser's camera off too.
+ if(videoOpen)closeVideo();
+ updateVideoUI();
  status(message+' Ссылка остаётся действительной: гость может подключиться снова.');
 }
-action('media',async()=>{await media();status(guest?'Камера готова. Нажмите «Подключиться к звонку».':'Камера готова. Введите ключ и создайте ссылку.');});
 action('invite',async()=>{
  if(guest)return;if(peer){if($('inviteLink').value)await shareInvitation($('inviteLink').value);return;}
- await prepareAudio();await media();const room=permanentRoom();await loadTurn();const p=await createPeer(room.id);secret=room.secret;translationEnabled=true;
+ await prepareAudio().catch(()=>{});const room=permanentRoom();await loadTurn();const p=await createPeer(room.id);secret=room.secret;translationEnabled=true;
  p.on('call',c=>c.close());
  p.on('connection',c=>{
  debug('host:incoming-data');
@@ -385,18 +461,18 @@ action('invite',async()=>{
   settled=true;clearTimeout(timer);pendingConnections.delete(c);
   debug('host:accepted-hello');authorized=true;expectedGuest=c.peer;peerPrefs={language:m.language,consent:m.consent};
   clearTimeout(invitationTimer);bindChannel(c);send({type:'accepted',...prefs()});
-  $('connection').textContent='○ Гость найден';status('Гость подтверждён. Ожидаем готовности к видеозвонку…');$('linkBox').hidden=true;deadline();
+  $('linkBox').hidden=true;sessionOnline();
  });
  });
- const u=new URL(location.href);u.hash=new URLSearchParams({call:p.id,secret}).toString();$('inviteLink').value=u.href;$('linkBox').hidden=true;$('connection').textContent='○ Ожидаем собеседника';status('Приглашение готово. Оставьте страницу открытой.');debug('host:waiting-guest');await shareInvitation(u.href);
+ const u=new URL(location.href);u.hash=new URLSearchParams({call:p.id,secret}).toString();$('inviteLink').value=u.href;$('linkBox').hidden=true;status('Приглашение готово. Оставьте страницу открытой.');debug('host:waiting-guest');await shareInvitation(u.href);
 });
 action('join',async()=>{
  if(!guest)return;
- if(peer&&!connected){end('Повторяем подключение по прежней ссылке…');}
+ if(peer&&!authorized){end('Повторяем подключение по прежней ссылке…');}
  if(peer)return;
- const attempt=++joinAttempt;if(!invitation)throw Error('Приглашение повреждено. Попросите новую ссылку.');status('Шаг 1/4: запускаем камеру…');await media();status('Шаг 2/4: соединяемся с сервером PeerJS…');await loadTurn();const p=await createPeer('lingua-'+randomHex(16));
+ const attempt=++joinAttempt;if(!invitation)throw Error('Приглашение повреждено. Попросите новую ссылку.');status('Шаг 1/3: соединяемся с сервером…');await loadTurn();const p=await createPeer('lingua-'+randomHex(16));
  p.on('connection',c=>c.on('open',()=>c.close()));
- p.on('call',c=>{debug('guest:incoming-call');if(c.peer!==invitation.id||call){c.close();return;}c.answer(local);watchCall(c);});
+ p.on('call',c=>{debug('guest:incoming-call');if(c.peer!==invitation.id||call||!videoOpen||!local){c.close();return;}c.answer(local);watchCall(c);});
  dataAttempt=0;hostMissing=0;guestDataConnect(p);
 });
 action('copy',async()=>{if(!$('inviteLink').value)throw Error('Создайте ссылку.');await navigator.clipboard.writeText($('inviteLink').value);status('Ссылка скопирована. Отправьте её собеседнику.');});
@@ -406,11 +482,11 @@ $('remote').onclick=()=>$('remote').play().catch(()=>{});
 function updatePrefs(){send({type:'prefs',...prefs()});if(!guest)restartAI();}
 $('consent').onchange=updatePrefs;$('language').onchange=()=>{if(guest)$('join').textContent=({vi:'Chấp nhận lời mời',en:'Accept invitation',ru:'Принять приглашение'})[$('language').value]||'Accept invitation';updatePrefs();};
 function stopSessions(clear=false){aiEpoch++;const old=sessions;sessions=[];old.forEach(s=>s.close());if(clear){clearCaption();send({type:'clear'});}$('stopAI').disabled=true;}
-function end(message='Звонок завершён. Ключ, титры и ссылка очищены.'){
- epoch++;clearConnectionTimers();dataAttempt=0;window.linguaKeyManager?.clearSession?.();window.linguaKeyChecks?.clear();window.linguaChat?.clear();clearTimeout(invitationTimer);clearTimeout(callTimer);clearTimeout(recoveryTimer);send({type:'end'});authorized=connected=false;stopSessions(true);hostAudio?.close().catch(()=>{});hostAudio=null;const c=call,p=peer,d=channel;call=peer=channel=null;c?.close();d?.close();pendingConnections.forEach(c=>c.close());pendingConnections.clear();p?.destroy();local?.getTracks().forEach(t=>t.stop());remote?.getTracks().forEach(t=>t.stop());local=remote=null;secret=expectedGuest=null;peerPrefs={consent:false,language:'en'};
- $('local').srcObject=$('remote').srcObject=null;$('chatGeminiKey').value=$('deepseekKey').value=$('credential').value=$('inviteLink').value='';$('linkBox').hidden=true;$('waiting').hidden=false;$('consent').checked=false;$('mic').disabled=$('cam').disabled=true;$('mic').textContent='Микрофон: вкл.';$('cam').textContent='Видео: вкл.';$('media').textContent='Проверить камеру';$('connection').textContent='○ Не подключено';$('aiStatus').textContent='Перевод выключен';$('invite').disabled=$('join').disabled=false;status(message);
+function end(message='Разговор завершён.'){
+ epoch++;videoOpen=peerVideo=false;videoRetries=0;clearConnectionTimers();dataAttempt=0;window.linguaKeyManager?.clearSession?.();window.linguaKeyChecks?.clear();window.linguaChat?.clear();clearTimeout(invitationTimer);clearTimeout(callTimer);clearTimeout(recoveryTimer);send({type:'end'});authorized=connected=false;stopSessions(true);hostAudio?.close().catch(()=>{});hostAudio=null;const c=call,p=peer,d=channel;call=peer=channel=null;c?.close();d?.close();pendingConnections.forEach(c=>c.close());pendingConnections.clear();p?.destroy();local?.getTracks().forEach(t=>t.stop());remote?.getTracks().forEach(t=>t.stop());local=remote=null;secret=expectedGuest=null;peerPrefs={consent:false,language:'en'};
+ $('local').srcObject=$('remote').srcObject=null;$('inviteLink').value='';$('linkBox').hidden=true;$('waiting').hidden=false;$('consent').checked=false;$('mic').textContent='Микрофон: вкл.';$('cam').textContent='Видео: вкл.';$('connection').textContent='○ Видео не подключено';$('aiStatus').textContent='Перевод выключен';$('invite').disabled=$('join').disabled=false;videoStatus('');showVideoWindow(false);status(message);
 }
-$('hangup').onclick=()=>end();window.addEventListener('pagehide',()=>end());
+$('hangup').onclick=()=>{if(!guest&&authorized)resetHostRoom('Вы завершили разговор.');else end();};window.addEventListener('pagehide',()=>end());
 async function startStream(stream,target,toGuest,generation){
  let source=null,node=null,provider=null,gate=null,closed=false;
  const entry={close(){if(closed)return;closed=true;provider?.close();gate?.clear();if(node){node.port.onmessage=null;node.disconnect();}source?.disconnect();}};sessions.push(entry);
@@ -430,7 +506,7 @@ async function restartAI(){
  if(!jobs.length){aiStatus('Для перевода каждый участник должен разрешить обработку своего голоса.');return;}
  $('stopAI').disabled=false;aiStatus('Подключаем перевод '+jobs.length+' направлений…');await Promise.all(jobs.map(j=>startStream(j.stream,j.language,j.toGuest,generation)));
 }
-action('translate',async()=>{if(!connected)throw Error('Сначала подключите собеседника.');await prepareAudio();translationEnabled=true;await restartAI();});
+action('translate',async()=>{if(!connected){aiStatus('Субтитры доступны во время видеозвонка.');return;}await prepareAudio();translationEnabled=true;await restartAI();});
 $('stopAI').onclick=()=>{translationEnabled=false;stopSessions();aiStatus('Организатор остановил перевод. Видеозвонок продолжается.');};
 
 for(const id of ['provider','vad','vadLevel'])$(id).onchange=()=>{if(!guest)restartAI();};

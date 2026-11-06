@@ -1,20 +1,21 @@
 'use strict';
 (()=>{
  const checks=new Map();let revision=0;
- function cancel(kind){const old=checks.get(kind);if(old){old.cancelled=true;old.provider?.close();old.translator?.close();old.cancel?.();checks.delete(kind);}$(kind==='voice'?'checkVoice':'checkChat').disabled=false;$(kind+'KeyStatus').textContent='';}
+ const buttons=kind=>kind==='voice'?[$('checkVoice')]:[$('checkChat'),$('checkDeepseek')];
+ function cancel(kind){const old=checks.get(kind);if(old){old.cancelled=true;old.provider?.close();old.translator?.close();old.cancel?.();checks.delete(kind);}buttons(kind).forEach(b=>b.disabled=false);$(kind+'KeyStatus').textContent='';}
  function probeLive(job,mode,key){return new Promise((resolve,reject)=>{job.cancel=()=>reject(Error('cancelled'));job.provider=TranslationProviders.create(mode,{key,target:'vi',onReady:resolve,onCaption(){},onError:code=>reject(Error(code)),onEnding:()=>reject(Error('connection'))});job.provider.connect();});}
- async function check(kind){cancel(kind);const job={cancelled:false,revision};checks.set(kind,job);const button=$(kind==='voice'?'checkVoice':'checkChat'),out=$(kind+'KeyStatus');
+ async function check(kind){cancel(kind);const job={cancelled:false,revision};checks.set(kind,job);const out=$(kind+'KeyStatus');
  const deepseek=kind==='chat'&&$('chatProvider').value==='deepseek';const key=(kind==='voice'?$('credential').value:deepseek?$('deepseekKey').value:($('chatGeminiKey').value||$('credential').value)).trim();
- if(!key){out.textContent='Введите ключ';return;}button.disabled=true;out.textContent='Проверяем…';out.dataset.state='pending';
+ if(!key){out.textContent='Введите ключ';out.dataset.state='error';checks.delete(kind);return;}buttons(kind).forEach(b=>b.disabled=true);out.textContent='Проверяем…';out.dataset.state='pending';
  try{if(kind==='voice'){await probeLive(job,$('provider').value,key);job.provider.close();if($('provider').value==='gemini-text'){job.translator=new GeminiTextTranslator(key,'vi');await job.translator.translate('Hello');}}else{job.translator=deepseek?new DeepSeekTextTranslator(key,'vi'):new GeminiTextTranslator(key,'vi');await job.translator.translate('Hello');}
  if(!job.cancelled&&job.revision===revision){out.textContent='Ключ и модель доступны';out.dataset.state='ok';}
  }catch(error){if(!job.cancelled&&job.revision===revision){out.textContent=deepseek?chatError(error.message):'Ошибка проверки: ключ, доступ к модели или сеть';out.dataset.state='error';}}
- finally{job.provider?.close();job.translator?.close();if(checks.get(kind)===job){checks.delete(kind);button.disabled=false;}}
+ finally{job.provider?.close();job.translator?.close();if(checks.get(kind)===job){checks.delete(kind);buttons(kind).forEach(b=>b.disabled=false);}}
  }
- $('checkVoice').onclick=()=>check('voice');$('checkChat').onclick=()=>check('chat');
  for(const id of ['credential','provider'])$(id).addEventListener(id==='provider'?'change':'input',()=>{cancel('voice');if(id==='credential')cancel('chat');});
  for(const id of ['chatProvider','deepseekKey','chatGeminiKey'])$(id).addEventListener(id==='chatProvider'?'change':'input',()=>cancel('chat'));
- window.linguaKeyChecks={clear(){revision++;cancel('voice');cancel('chat');}};
+ // Started by the key forms (key-manager.js), so that the same tap also lets Safari offer to save the key.
+ window.linguaKeyChecks={run:check,clear(){revision++;cancel('voice');cancel('chat');}};
 })();
 (()=>{
  const tile=$('selfPreview'),stage=tile.parentElement;let drag=null,x=1,y=0.15;

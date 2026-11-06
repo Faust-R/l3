@@ -1,10 +1,19 @@
-// API keys are deliberately never persisted to localStorage or IndexedDB.
-// Safari/iOS Passwords may offer native credential autofill, depending on browser behavior.
+'use strict';
+// API keys are never stored by the site (no localStorage, no server).
+// Each key sits in its own small login-style form: a hidden user name («Gemini API» / «DeepSeek API»)
+// plus a password field. Safari and the iPhone «Пароли» app treat it as a login for this site:
+// tapping the field offers the saved key, and «Проверить» lets Safari offer to save or update it.
+// The form is submitted into an about:blank iframe: Safari sees a real form submission,
+// while nothing is sent over the network.
 (()=>{
- const ids=['credential','chatGeminiKey','deepseekKey'];
- for(const id of ids){const el=document.getElementById(id);if(!el)continue;el.setAttribute('autocomplete','current-password');el.setAttribute('autocapitalize','off');el.setAttribute('spellcheck','false');}
- const vault=document.querySelector('.vault');if(vault)vault.remove();
- const box=document.createElement('p');box.className='hint';box.textContent='Ключи не сохраняются сайтом. Для автозаполнения используйте приложение «Пароли» iPhone; Safari может предложить сохранение. После перезагрузки ключ можно вставить снова.';
- document.getElementById('apiPanel')?.append(box);
+ const site=$('keySite');if(site)site.textContent=location.host||'—';
+ for(const form of document.querySelectorAll('.key-form')){
+  form.addEventListener('submit',e=>{
+   const input=form.querySelector('input[type=password]');
+   const value=input.value.trim();if(value!==input.value)input.value=value;
+   window.linguaKeyChecks?.run(form.dataset.check);
+   if(!value)e.preventDefault();
+  });
+ }
  window.linguaKeyManager={clearSession(){}};
 })();
